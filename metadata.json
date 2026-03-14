@@ -1,0 +1,5 @@
+{
+  "name": "TaskFlow",
+  "description": "A modern, minimal todo management app with search, editing, and notification features.",
+  "requestFramePermissions": ["notifications"]
+}
