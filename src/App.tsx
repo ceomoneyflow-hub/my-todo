@@ -1,14 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Search, Trash2, CheckCircle2, Circle, Clock, AlertCircle, Bell, BellOff, Edit2, X } from 'lucide-react';
+import { Plus, Search, Trash2, CheckCircle2, Circle, Clock, AlertCircle, Bell, BellOff, Edit2, X, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Todo, TodoFilter } from './types';
 import { useNotifications } from './hooks/useNotifications';
+import { supabase } from './lib/supabase';
 
 export default function App() {
-  const [todos, setTodos] = useState<Todo[]>(() => {
-    const saved = localStorage.getItem('taskflow_todos');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<TodoFilter>('active');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -22,9 +21,39 @@ export default function App() {
 
   const { permission, requestPermission, sendNotification } = useNotifications();
 
+  // Fetch todos from Supabase
+  const fetchTodos = async () => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('todos')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      
+      // Map Supabase snake_case to our camelCase types
+      const mappedTodos: Todo[] = (data || []).map(item => ({
+        id: item.id,
+        title: item.title,
+        description: item.description || '',
+        completed: item.completed,
+        dueDate: item.due_date,
+        priority: item.priority,
+        createdAt: item.created_at
+      }));
+      
+      setTodos(mappedTodos);
+    } catch (error) {
+      console.error('Error fetching todos:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    localStorage.setItem('taskflow_todos', JSON.stringify(todos));
-  }, [todos]);
+    fetchTodos();
+  }, []);
 
   // Notification Checker
   useEffect(() => {
@@ -33,7 +62,6 @@ export default function App() {
       todos.forEach(todo => {
         if (!todo.completed && todo.dueDate) {
           const due = new Date(todo.dueDate);
-          // Notify if due within the next minute and not already notified
           const diff = due.getTime() - now.getTime();
           if (diff > 0 && diff < 60000) {
             sendNotification(`Task Due Soon: ${todo.title}`, {
@@ -43,7 +71,7 @@ export default function App() {
           }
         }
       });
-    }, 30000); // Check every 30 seconds
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [todos, sendNotification]);
@@ -61,32 +89,71 @@ export default function App() {
       .sort((a, b) => new Date(a.dueDate || '').getTime() - new Date(b.dueDate || '').getTime());
   }, [todos, searchQuery, filter]);
 
-  const handleAddOrEdit = (e: React.FormEvent) => {
+  const handleAddOrEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
-    if (editingTodo) {
-      setTodos(todos.map(t => t.id === editingTodo.id ? {
-        ...t,
-        title,
-        description,
-        dueDate,
-        priority
-      } : t));
-    } else {
-      const newTodo: Todo = {
-        id: crypto.randomUUID(),
-        title,
-        description,
-        completed: false,
-        dueDate,
-        priority,
-        createdAt: new Date().toISOString()
-      };
-      setTodos([newTodo, ...todos]);
-    }
+    try {
+      if (editingTodo) {
+        const { error } = await supabase
+          .from('todos')
+          .update({
+            title,
+            description,
+            due_date: dueDate || null,
+            priority
+          })
+          .eq('id', editingTodo.id);
 
-    closeModal();
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('todos')
+          .insert([{
+            title,
+            description,
+            completed: false,
+            due_date: dueDate || null,
+            priority
+          }]);
+
+        if (error) throw error;
+      }
+      
+      fetchTodos(); // Refresh list
+      closeModal();
+    } catch (error) {
+      console.error('Error saving todo:', error);
+      alert('Failed to save task. Please check if the "todos" table exists in your Supabase project.');
+    }
+  };
+
+  const toggleComplete = async (todo: Todo) => {
+    try {
+      const { error } = await supabase
+        .from('todos')
+        .update({ completed: !todo.completed })
+        .eq('id', todo.id);
+
+      if (error) throw error;
+      fetchTodos();
+    } catch (error) {
+      console.error('Error toggling complete:', error);
+    }
+  };
+
+  const deleteTodo = async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('todos')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      fetchTodos();
+    } catch (error) {
+      console.error('Error deleting todo:', error);
+    }
   };
 
   const openModal = (todo?: Todo) => {
@@ -109,14 +176,6 @@ export default function App() {
   const closeModal = () => {
     setIsModalOpen(false);
     setEditingTodo(null);
-  };
-
-  const toggleComplete = (id: string) => {
-    setTodos(todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
-  };
-
-  const deleteTodo = (id: string) => {
-    setTodos(todos.filter(t => t.id !== id));
   };
 
   const getPriorityColor = (p: Todo['priority']) => {
@@ -197,25 +256,31 @@ export default function App() {
 
         {/* Task List */}
         <div className="space-y-4">
-          <AnimatePresence mode="popLayout">
-            {filteredTodos.length > 0 ? (
-              filteredTodos.map((todo) => (
-                <motion.div
-                  key={todo.id}
-                  layout
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  className={`group bg-white p-5 rounded-3xl border border-black/5 shadow-sm hover:shadow-md transition-all flex items-start gap-4 ${
-                    todo.completed ? 'opacity-60' : ''
-                  }`}
-                >
-                  <button 
-                    onClick={() => toggleComplete(todo.id)}
-                    className={`mt-1 transition-colors ${todo.completed ? 'text-emerald-500' : 'text-gray-300 hover:text-emerald-400'}`}
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+              <Loader2 className="animate-spin mb-4" size={40} />
+              <p>Loading tasks from Supabase...</p>
+            </div>
+          ) : (
+            <AnimatePresence mode="popLayout">
+              {filteredTodos.length > 0 ? (
+                filteredTodos.map((todo) => (
+                  <motion.div
+                    key={todo.id}
+                    layout
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className={`group bg-white p-5 rounded-3xl border border-black/5 shadow-sm hover:shadow-md transition-all flex items-start gap-4 ${
+                      todo.completed ? 'opacity-60' : ''
+                    }`}
                   >
-                    {todo.completed ? <CheckCircle2 size={24} /> : <Circle size={24} />}
-                  </button>
+                    <button 
+                      onClick={() => toggleComplete(todo)}
+                      className={`mt-1 transition-colors ${todo.completed ? 'text-emerald-500' : 'text-gray-300 hover:text-emerald-400'}`}
+                    >
+                      {todo.completed ? <CheckCircle2 size={24} /> : <Circle size={24} />}
+                    </button>
                   
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-1">
@@ -275,6 +340,7 @@ export default function App() {
               </motion.div>
             )}
           </AnimatePresence>
+          )}
         </div>
       </main>
 
